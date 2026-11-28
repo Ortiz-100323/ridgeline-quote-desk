@@ -1,0 +1,146 @@
+{
+  "threshold": 0.8,
+  "extraction_accuracy": 0.8947,
+  "match_precision": 1.0,
+  "match_recall": 0.7647,
+  "additional_metrics": {
+    "generated_at": "2026-11-28T08:40:13+00:00",
+    "rfqs_with_answer_key": 3,
+    "line_recall": 1.0,
+    "line_precision": 1.0,
+    "quantity_accuracy": 1.0,
+    "unit_accuracy": 0.8947,
+    "top1_part_accuracy": 1.0,
+    "abstain_accuracy": 0.5,
+    "review_rate": 0.3158,
+    "customer_accuracy": 1.0,
+    "counts": {
+      "expected": 19,
+      "predicted": 19,
+      "aligned": 19,
+      "qty_ok": 19,
+      "unit_ok": 17,
+      "extracted_ok": 17,
+      "with_part": 17,
+      "accepted": 13,
+      "accepted_right": 13,
+      "top1_right": 17,
+      "no_part": 2,
+      "abstained": 1
+    },
+    "per_rfq": {
+      "rfq_01_email": {
+        "expected": 5,
+        "predicted": 5,
+        "aligned": 5,
+        "qty_ok": 5,
+        "unit_ok": 3,
+        "extracted_ok": 3,
+        "with_part": 4,
+        "accepted": 2,
+        "accepted_right": 2,
+        "top1_right": 4,
+        "no_part": 1,
+        "abstained": 0
+      },
+      "rfq_02_clearwater": {
+        "expected": 6,
+        "predicted": 6,
+        "aligned": 6,
+        "qty_ok": 6,
+        "unit_ok": 6,
+        "extracted_ok": 6,
+        "with_part": 6,
+        "accepted": 6,
+        "accepted_right": 6,
+        "top1_right": 6,
+        "no_part": 0,
+        "abstained": 0
+      },
+      "rfq_03_tricounty": {
+        "expected": 8,
+        "predicted": 8,
+        "aligned": 8,
+        "qty_ok": 8,
+        "unit_ok": 8,
+        "extracted_ok": 8,
+        "with_part": 7,
+        "accepted": 5,
+        "accepted_right": 5,
+        "top1_right": 7,
+        "no_part": 1,
+        "abstained": 1
+      }
+    },
+    "threshold_sweep": [
+      {
+        "threshold": 0.5,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.6,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.7,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.75,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.8,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.85,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.9,
+        "auto_accepted": 13,
+        "precision": 1.0,
+        "recall": 0.7647
+      },
+      {
+        "threshold": 0.95,
+        "auto_accepted": 8,
+        "precision": 1.0,
+        "recall": 0.4706
+      }
+    ],
+    "rfqs_without_answer_key": {
+      "rfq_04_handwritten": {
+        "lines": 5,
+        "needs_review": 5,
+        "matched": 5,
+        "customer_id": "C1004"
+      },
+      "rfq_05_forwarded_chain": {
+        "lines": 3,
+        "needs_review": 1,
+        "matched": 3,
+        "customer_id": null
+      },
+      "rfq_06_messy": {
+        "lines": 6,
+        "needs_review": 6,
+        "matched": 4,
+        "customer_id": "C1008"
+      }
+    }
+  }
+}

@@ -9,11 +9,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from app.db import connect
 from app.paths import ROOT, RFQ_DIR, safe_path
-from app.pipeline_log import PipelineLogger
+from app.pipeline_log import PipelineLogger, safe_error
 
 FILE_TYPES = {
     ".txt": "text", ".eml": "text", ".md": "text", ".msg": "text",
@@ -74,38 +75,52 @@ def dispatch(folder: Path = RFQ_DIR) -> list[str]:
         try:
             files = find_rfq_files(folder)
         except (OSError, PermissionError) as exc:
-            log.error("run_failed", f"Cannot read folder: {exc}", folder=str(folder))
+            log.error("run_failed", f"Cannot read folder: {safe_error(exc)}", folder=str(folder))
             raise
         log.info("files_found", f"{len(files)} file(s) found", files=[p.name for p in files])
 
-        with connect() as conn:
-            for path in files:
-                try:
-                    rfq = describe(path)
-                    with conn.transaction():
-                        job_id = conn.execute(
-                            """INSERT INTO jobs (rfq_id, source_path, file_name, file_type, file_extension,
-                                                 mime_type, file_size_bytes, source_sha256, dispatch_run_id)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING job_id""",
-                            (rfq.rfq_id, rfq.source_path, rfq.file_name, rfq.file_type, rfq.file_extension,
-                             rfq.mime_type, rfq.file_size_bytes, rfq.source_sha256, log.run_id),
-                        ).fetchone()[0]
-                        conn.execute(
-                            "INSERT INTO job_events (job_id, event, actor, detail) VALUES (%s, 'created', 'dispatcher', %s)",
-                            (job_id, Jsonb({"run_id": str(log.run_id), "source_path": rfq.source_path})),
-                        )
-                except Exception as exc:  # noqa: BLE001 - one bad file must not stop the others
-                    log.error("job_failed", f"Could not queue {path.name}: {exc}", file_name=path.name)
-                    continue
-                job_ids.append(str(job_id))
-                log.info("job_created", f"Queued {rfq.file_name} as {rfq.file_type}", job_id=job_id,
-                         rfq_id=rfq.rfq_id, source_path=rfq.source_path, file_type=rfq.file_type,
-                         file_size_bytes=rfq.file_size_bytes, source_sha256=rfq.source_sha256)
-                if rfq.file_type == "other":
-                    log.warning("unknown_file_type", f"{rfq.file_name}: no extractor for this type",
-                                job_id=job_id, file_extension=rfq.file_extension)
+        try:
+            _queue_files(files, log, job_ids)
+        except Exception as exc:  # DB down, crash: never end a run without a trace
+            log.link_run_rows()
+            log.error("run_failed", f"Run stopped after {len(job_ids)} job(s): {safe_error(exc)}",
+                      duration_ms=int((time.monotonic() - started) * 1000), queued=len(job_ids))
+            raise
 
+        log.link_run_rows()
         log.info("run_finished", f"{len(job_ids)} job(s) queued, {len(files) - len(job_ids)} failed",
                  duration_ms=int((time.monotonic() - started) * 1000),
                  queued=len(job_ids), failed=len(files) - len(job_ids))
     return job_ids
+
+
+def _queue_files(files: list[Path], log: PipelineLogger, job_ids: list[str]) -> None:
+    """One transaction per file: a bad file is logged and skipped, the others are queued."""
+    with connect() as conn:
+        for path in files:
+            try:
+                rfq = describe(path)
+                with conn.transaction():
+                    job_id = conn.execute(
+                        """INSERT INTO jobs (rfq_id, source_path, file_name, file_type, file_extension,
+                                             mime_type, file_size_bytes, source_sha256, dispatch_run_id)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING job_id""",
+                        (rfq.rfq_id, rfq.source_path, rfq.file_name, rfq.file_type, rfq.file_extension,
+                         rfq.mime_type, rfq.file_size_bytes, rfq.source_sha256, log.run_id),
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO job_events (job_id, event, actor, detail) VALUES (%s, 'created', 'dispatcher', %s)",
+                        (job_id, Jsonb({"run_id": str(log.run_id), "source_path": rfq.source_path})),
+                    )
+            except psycopg.OperationalError:
+                raise                     # database gone: stop the run (logged as run_failed)
+            except Exception as exc:  # noqa: BLE001 - one bad file must not stop the others
+                log.error("job_failed", f"Could not queue {path.name}: {safe_error(exc)}", file_name=path.name)
+                continue
+            job_ids.append(str(job_id))
+            log.info("job_created", f"Queued {rfq.file_name} as {rfq.file_type}", job_id=job_id,
+                     rfq_id=rfq.rfq_id, source_path=rfq.source_path, file_type=rfq.file_type,
+                     file_size_bytes=rfq.file_size_bytes, source_sha256=rfq.source_sha256)
+            if rfq.file_type == "other":
+                log.warning("unknown_file_type", f"{rfq.file_name}: no extractor for this type",
+                            job_id=job_id, file_extension=rfq.file_extension)

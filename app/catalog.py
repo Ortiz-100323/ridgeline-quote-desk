@@ -105,6 +105,31 @@ def load_cross_references(path: Path = CROSS_REFERENCE_CSV) -> dict[str, list[Cr
     return xrefs
 
 
+def load_catalog_from_db(conn) -> Catalog:
+    """Same Catalog, read from Postgres (includes cross-references added by the portal)."""
+    products = {}
+    for row in conn.execute(
+        """SELECT part_number, description, category, unit, list_price, status, replaced_by,
+                  primary_warehouse FROM products"""
+    ).fetchall():
+        products[row[0]] = Product(*row)
+    customers = {r[0]: Customer(*r) for r in conn.execute(
+        "SELECT customer_id, name, region, pricing_tier FROM customers").fetchall()}
+    xrefs: dict[str, list[CrossReference]] = {}
+    for comp, cpn, rpn, notes, verified in conn.execute(
+        """SELECT competitor, competitor_part_number, ridgeline_part_number, notes, last_verified
+           FROM cross_references ORDER BY cross_reference_id"""
+    ).fetchall():
+        xrefs.setdefault(normalize_part_number(cpn), []).append(
+            CrossReference(comp, cpn, rpn, notes, verified.isoformat() if verified else None))
+    return Catalog(
+        products=products,
+        products_normalized={normalize_part_number(pn): p for pn, p in products.items()},
+        customers=customers,
+        cross_references=xrefs,
+    )
+
+
 @lru_cache(maxsize=1)
 def load_catalog() -> Catalog:
     products = load_products()

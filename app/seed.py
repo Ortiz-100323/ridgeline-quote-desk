@@ -24,9 +24,12 @@ def seed() -> dict[str, int]:
             """INSERT INTO products (part_number, description, category, unit, list_price, status,
                                      primary_warehouse)
                VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (part_number) DO UPDATE SET description = EXCLUDED.description,
-                   category = EXCLUDED.category, unit = EXCLUDED.unit, list_price = EXCLUDED.list_price,
-                   status = EXCLUDED.status, primary_warehouse = EXCLUDED.primary_warehouse""",
+               ON CONFLICT (part_number) DO UPDATE SET
+                   description = CASE WHEN products.portal_revision = 0 THEN EXCLUDED.description ELSE products.description END,
+                   category = CASE WHEN products.portal_revision = 0 THEN EXCLUDED.category ELSE products.category END,
+                   unit = CASE WHEN products.portal_revision = 0 THEN EXCLUDED.unit ELSE products.unit END,
+                   primary_warehouse = CASE WHEN products.portal_revision = 0 THEN EXCLUDED.primary_warehouse ELSE products.primary_warehouse END,
+                   list_price = EXCLUDED.list_price, status = EXCLUDED.status""",
             [(p.part_number, p.description, p.category, p.unit, p.list_price, p.status, p.primary_warehouse)
              for p in products.values()],
         )

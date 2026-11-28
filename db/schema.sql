@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS products (
     primary_warehouse  text NOT NULL,
     CHECK (replaced_by IS NULL OR replaced_by <> part_number)
 );
+ALTER TABLE products ADD COLUMN IF NOT EXISTS portal_revision integer NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS products_description_trgm ON products USING gin (description gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS products_category ON products (category);
 
@@ -164,11 +165,33 @@ CREATE TABLE IF NOT EXISTS pipeline_logs (
     step         text NOT NULL,          -- e.g. run_started, file_found, job_created, run_finished
     message      text NOT NULL,
     duration_ms  integer CHECK (duration_ms >= 0),
-    detail       jsonb NOT NULL DEFAULT '{}'::jsonb
+    detail       jsonb NOT NULL DEFAULT '{}'::jsonb,
+    job_ids      uuid[] NOT NULL DEFAULT '{}'   -- run-level rows (no single job_id): the jobs this run touched
 );
+ALTER TABLE pipeline_logs ADD COLUMN IF NOT EXISTS job_ids uuid[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS pipeline_logs_job ON pipeline_logs (job_id, log_id);
+CREATE INDEX IF NOT EXISTS pipeline_logs_job_ids ON pipeline_logs USING gin (job_ids);
 CREATE INDEX IF NOT EXISTS pipeline_logs_run ON pipeline_logs (run_id, log_id);
 CREATE INDEX IF NOT EXISTS pipeline_logs_errors ON pipeline_logs (created_at) WHERE level IN ('WARNING', 'ERROR');
+
+-- One searchable log, every row with a job_id: SELECT * FROM job_log WHERE job_id = ... ORDER BY created_at;
+-- Combines pipeline_logs (rows for the job, plus run-level rows that list it in job_ids)
+-- and job_events (status changes).
+CREATE OR REPLACE VIEW job_log AS
+SELECT j.job_id, l.created_at, 'pipeline_logs'::text AS source, l.log_id AS source_id, l.run_id,
+       l.component, l.actor, l.level, l.step, l.message, l.duration_ms, l.detail
+FROM pipeline_logs l
+CROSS JOIN LATERAL (
+    SELECT DISTINCT x AS job_id
+    FROM unnest(CASE WHEN l.job_id IS NULL THEN l.job_ids ELSE l.job_ids || l.job_id END) AS x
+) j
+UNION ALL
+SELECT e.job_id, e.created_at, 'job_events', e.event_id, NULL,
+       split_part(e.actor, ':', 1),
+       e.actor,
+       CASE WHEN e.event IN ('escalated', 'failed', 'lease_expired') THEN 'WARNING' ELSE 'INFO' END,
+       e.event, e.event, NULL, e.detail
+FROM job_events e;
 
 -- ---------------------------------------------------------------------------
 -- Draft quote produced by a worker (mirrors outputs/<rfq_id>.json)

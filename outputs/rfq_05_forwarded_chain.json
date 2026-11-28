@@ -1,0 +1,48 @@
+{
+  "rfq_id": "rfq_05_forwarded_chain",
+  "customer_id": null,
+  "customer_name": null,
+  "lines": [
+    {
+      "line": 1,
+      "as_written": "3 HP TEFC motor, 1800 rpm, 3 phase",
+      "quantity": 2.0,
+      "unit": null,
+      "ridgeline_part_number": "RL110322",
+      "match_method": "description",
+      "confidence": 0.9,
+      "needs_review": false,
+      "flags": [],
+      "note": "customer: Rick's later message changed the motor from 3 HP to 5 HP (the 3 HP won't handle the new mixer). Quantity 2 unchanged."
+    },
+    {
+      "line": 2,
+      "as_written": "2\" flange gaskets 150#",
+      "quantity": 40.0,
+      "unit": null,
+      "ridgeline_part_number": "RL118373",
+      "match_method": "description",
+      "confidence": 0.85,
+      "needs_review": false,
+      "flags": [],
+      "note": "customer: Quantity changed from 20 to 40 in Rick's later message."
+    },
+    {
+      "line": 3,
+      "as_written": "food grade grease cartridges",
+      "quantity": 3.0,
+      "unit": "case",
+      "ridgeline_part_number": "RL184696",
+      "match_method": "description",
+      "confidence": 0.9,
+      "needs_review": true,
+      "flags": [
+        "vague_description"
+      ],
+      "note": "customer: Rick confirmed the grease is fine as is."
+    }
+  ],
+  "non_item_rows": [
+    "Please quote per Rick's changes below. Thanks - Nina"
+  ]
+}

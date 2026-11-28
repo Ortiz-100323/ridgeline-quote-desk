@@ -1,0 +1,89 @@
+{
+  "rfq_id": "rfq_04_handwritten",
+  "customer_id": "C1004",
+  "customer_name": "Kowalski Machine Works",
+  "lines": [
+    {
+      "line": 1,
+      "as_written": "6205 2RS brgs x 30",
+      "quantity": 30.0,
+      "unit": null,
+      "ridgeline_part_number": "RL104165",
+      "match_method": "description",
+      "confidence": 0.85,
+      "needs_review": true,
+      "flags": [
+        "from_image"
+      ],
+      "note": null
+    },
+    {
+      "line": 2,
+      "as_written": "A48 belts x 8",
+      "quantity": 8.0,
+      "unit": null,
+      "ridgeline_part_number": "RL134671",
+      "match_method": "description",
+      "confidence": 0.85,
+      "needs_review": true,
+      "flags": [
+        "from_image"
+      ],
+      "note": null
+    },
+    {
+      "line": 3,
+      "as_written": "#40 chain 10ft x 2 bx",
+      "quantity": 2.0,
+      "unit": "box",
+      "ridgeline_part_number": "RL130512",
+      "match_method": "description",
+      "confidence": 0.51,
+      "needs_review": true,
+      "flags": [
+        "size_mismatch",
+        "ambiguous_match",
+        "from_image"
+      ],
+      "note": "catalog item lacks 40; close alternatives: RL159429, RL148520, RL134993"
+    },
+    {
+      "line": 4,
+      "as_written": "3/8 push-in elbows x 50",
+      "quantity": 50.0,
+      "unit": null,
+      "ridgeline_part_number": "RL177128",
+      "match_method": "description",
+      "confidence": 0.85,
+      "needs_review": true,
+      "flags": [
+        "from_image",
+        "vague_description"
+      ],
+      "note": null
+    },
+    {
+      "line": 5,
+      "as_written": "grease - the usual",
+      "quantity": null,
+      "unit": null,
+      "ridgeline_part_number": "RL188259",
+      "match_method": "description",
+      "confidence": 0.6,
+      "needs_review": true,
+      "flags": [
+        "ambiguous_match",
+        "from_image",
+        "quantity_unclear",
+        "refers_to_previous_order",
+        "vague_description"
+      ],
+      "note": "close alternatives: RL195561, RL184696; customer: Customer says \"the usual\""
+    }
+  ],
+  "non_item_rows": [
+    "Ridgeline - pls quote",
+    "Kowalski Machine - Ed",
+    "thx! need by Thurs"
+  ]
+}

@@ -31,7 +31,7 @@ Postgres 16, created by `db/schema.sql`. Run `python -m app.seed` to create the 
 | Table | Written by | Purpose |
 |---|---|---|
 | `customers` | seed | Ridgeline customers |
-| `products` | seed | Catalog, with prices and replacements |
+| `products` | seed, portal | Catalog, with prices and replacements |
 | `cross_references` | seed, portal (future) | Competitor part → Ridgeline part |
 | `jobs` | dispatcher, worker, portal | **The queue.** One row per RFQ file |
 | `job_events` | dispatcher, worker, portal | Audit trail of every status change |
@@ -156,7 +156,15 @@ Inside a single attempt, the worker first retries the API call after a few secon
 
 ### 3.4 `pipeline_logs`: end-to-end log
 
-`job_events` keeps status changes only. `pipeline_logs` keeps **every step** of every component, so one RFQ can be traced from dispatch to review. Write to it with `app.pipeline_log.PipelineLogger`. It uses its own autocommit connection, so rows survive a rolled-back transaction, and it falls back to the console if the DB is down.
+`job_events` keeps status changes only. `pipeline_logs` keeps **every step** of every component, so one RFQ can be traced from dispatch to review. Write to it with `app.pipeline_log.PipelineLogger`:
+- It uses its own autocommit connection, so rows survive a rolled-back transaction.
+- After a dropped connection it reconnects once per write, and falls back to the console if the DB stays down.
+- It is thread-safe.
+- The portal writes its rows directly, in the same transaction as the review action (`_log_portal`).
+
+**Every log row is searchable by job.** A row about one RFQ has `job_id`. A run-level row (`run_started`, `worker_stopped`, ...) has no single job, so it lists the run's jobs in `job_ids`. Call `log.link_run_rows()` before the last row of a run, so the run's earlier rows get them too. The view **`job_log`** puts it all together with one `job_id` per row: `pipeline_logs` (directly or through `job_ids`) plus `job_events`. Rows that have no job at all (a run that queued nothing, a product edit) are not in the view.
+
+**Error text.** Write exceptions to the DB with `safe_error(exc)`: the class name and the first line, and for database errors the primary message, constraint and sqlstate, **never** psycopg's `DETAIL: Failing row contains (...)`, which can hold RFQ text. Full tracebacks go to the console only.
 
 | Column | Meaning |
 |---|---|
@@ -164,6 +172,7 @@ Inside a single attempt, the worker first retries the API call after a few secon
 | `created_at` | timestamptz |
 | `run_id` | One process run: a dispatcher run, a worker session or a portal request |
 | `job_id` | The RFQ concerned, or null for run-level steps |
+| `job_ids` | uuid[]. On run-level rows: the jobs the run touched (GIN index) |
 | `component` | `dispatcher`, `worker`, `portal`, `seed` or `evaluation` |
 | `actor` | `dispatcher`, `worker:<id>`, `portal:<user>` |
 | `level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
@@ -172,17 +181,73 @@ Inside a single attempt, the worker first retries the API call after a few secon
 | `duration_ms` | Optional timing |
 | `detail` | jsonb, with step-specific fields |
 
-Steps so far: **dispatcher** `run_started`, `files_found`, `job_created`, `unknown_file_type`, `job_failed`, `run_failed`, `run_finished`. The worker and the portal will add theirs, for example `claimed`, `extracted`, `matched`, `quote_written`, `retry_scheduled`, `escalated`, `approved` and `rejected`. Never put secrets or full RFQ contents in `message` or `detail`.
+Steps so far: **dispatcher** `run_started`, `files_found`, `job_created`, `unknown_file_type`, `job_failed`, `run_failed`, `run_finished`. **worker transformer** (§3.5) `transformed`, `routed_to_llm`, `unsupported_file`. **worker extractor** (§3.6) `llm_call`, `llm_retry`, `llm_retries_exhausted`, `llm_fallback`, `llm_fallback_failed`, `extracted`, `extraction_failed`. **worker matcher** (§5.1) `matched`. **worker loop** (§3.7) `worker_started`, `lease_expired`, `claimed`, `customer_matched`, `customer_unknown`, `quote_written`, `retry_scheduled`, `escalated`, `lease_lost`, `heartbeat_failed`, `released`, `worker_crashed`, `worker_stopped`. **portal** `approved`, `rejected`, `requeued`, `cancelled`, `part_corrected`, `product_created`, `product_updated`. Never put secrets or full RFQ contents in `message` or `detail`.
 
 ```sql
--- Everything that happened to one RFQ
-SELECT created_at, component, level, step, message FROM pipeline_logs WHERE job_id = %s ORDER BY log_id;
+-- Everything that happened to one RFQ, from both tables, run-level rows included
+SELECT created_at, source, component, level, step, message FROM job_log WHERE job_id = %s ORDER BY created_at;
+-- Run-level rows of the runs that touched a job
+SELECT * FROM pipeline_logs WHERE %s = ANY(job_ids) ORDER BY log_id;
 -- One dispatcher run, and the jobs it created
 SELECT * FROM pipeline_logs WHERE run_id = %s ORDER BY log_id;
 SELECT * FROM jobs WHERE dispatch_run_id = %s;
 -- Recent problems
 SELECT * FROM pipeline_logs WHERE level IN ('WARNING', 'ERROR') ORDER BY log_id DESC LIMIT 50;
 ```
+
+### 3.5 Worker step 1: transformer (`app/worker/transformer.py`)
+
+`transform(source_path, rfq_id=, job_id=, log=)` turns the job's file into text for the LLM, or routes it to the LLM unchanged. Not wired to the queue yet: the worker flow will call it after `claimed`.
+
+| Input | `route` | Output |
+|---|---|---|
+| `.txt` `.eml` `.md` | `text` | Passed through: `text_path` is the source file |
+| `.pdf` with a text layer | `text` | `work/text/<rfq_id>_<job_id[:8]>.txt`. Pages as `=== Page N ===`; tables as `a \| b \| c` rows, kept in reading order |
+| `.xlsx` `.xlsm` | `text` | Same location. Each sheet as `=== Sheet: name ===`, each non-empty row as `R<row>: a \| b \| c` (row numbers kept for traceability) |
+| `.pdf` under `TRANSFORMER_MIN_CHARS_PER_PAGE` (default 50) non-whitespace chars per page | `llm_direct` | None. Scanned document: the original goes to the LLM (vision), lines get the `from_image` flag |
+| images (`.png`, `.jpg`, ...) | `llm_direct` | None. Same as above |
+| `.xls`, `other` | `unsupported` | None. Escalate to a person |
+
+A supported file that cannot be read (corrupt or encrypted) raises `TransformError`: treat it as unrecoverable (`failed` + `escalation_reason`). `work/` is git-ignored scratch space; never put it under `outputs/`, which only holds quote JSONs. Try it without the database: `python -m app.worker.transformer [files...]`.
+
+### 3.6 Worker step 2: LLM extraction (`app/worker/extractor.py`)
+
+`Extractor(log=).extract(transform_result, job_id=)` sends the RFQ to Claude with a structured-output schema (`app/worker/schemas.py`: `RfqExtraction` with `ExtractedLine`) and returns an `ExtractionResult`. It **extracts only**: part numbers are copied as written and classified (`ridgeline`, `competitor`, `manufacturer`), and the matcher maps them to `products` and `customers` later.
+
+- **Input.** Route `text`: the text, inside `<rfq_document>` tags (treated as data, not instructions). Route `llm_direct`: images as image blocks (converted to PNG when the type isn't accepted or the file is over 5 MB) and scanned PDFs as document blocks. `result.from_image` is set, so every line gets `from_image` and `needs_review`.
+- **Timeouts.** Timeouts, connection errors, 408, 409, 429 and 5xx are retried `LLM_MAX_RETRIES` times per model, with backoff `LLM_RETRY_BACKOFF_SECONDS * 2^(n-1)` (max `LLM_RETRY_MAX_BACKOFF_SECONDS`) plus jitter. The SDK's own retries are off. When the retries run out: `ExtractionError(retryable=True)`, so the queue schedules a retry (§3.3). Other 4xx errors raise `retryable=False`.
+- **Fallback.** Document confidence = min(`overall_confidence`, mean line `extraction_confidence`). Below `LLM_CONFIDENCE_THRESHOLD`, or on an unusable answer (invalid JSON, cut off at `max_tokens`, refusal, no lines), the same request goes once to `FALLBACK_MODEL`. Its answer is used when it is usable. If the fallback fails but the primary answer is usable, the primary answer is kept. `below_threshold` stays true when the final answer is still under the threshold. The result goes to `jobs.model_used` / `fallback_used`.
+- **Not a reason to fall back.** A vague request ("same as last order", "a few boxes") is a property of the RFQ, not a reading error. It goes into `ExtractedLine.issues` (`quantity_unclear`, `unit_unclear`, `refers_to_previous_order`, `refers_to_other_line`, `vague_description`, `illegible`, `substitution_allowed`), which the matcher turns into flags and `needs_review`.
+- **Email chains.** `as_written` keeps the original text. Quantity and description take the final values, and `customer_note` says what changed.
+- **Settings** (env, see `.env.example`): `ANTHROPIC_API_KEY`, `MODEL_NAME`, `FALLBACK_MODEL`, `LLM_TIMEOUT_SECONDS` (120), `LLM_MAX_RETRIES` (3), `LLM_RETRY_BACKOFF_SECONDS` (2), `LLM_RETRY_MAX_BACKOFF_SECONDS` (30), `LLM_CONFIDENCE_THRESHOLD` (0.8), `LLM_MAX_TOKENS` (16000), `LLM_EFFORT` (empty = model default).
+- **Logs** never contain RFQ text: model, duration, tokens, stop reason, request id, confidence and line numbers only. CLI (calls the API, no database): `python -m app.worker.extractor rfqs/<file> [--json]`.
+
+### 3.7 Worker flow (`app/worker/worker.py`, `python -m app.worker`)
+
+```mermaid
+flowchart LR
+    R[recover expired leases] --> C[claim SKIP LOCKED]
+    C -->|none| E[sleep WORKER_POLL_SECONDS / exit with --once]
+    C --> T[transform §3.5] --> X[extract §3.6] --> M[match lines §5.1 + customer]
+    M --> S[one transaction: quotes + quote_lines + outputs JSON + succeeded]
+    T -. unsupported / unreadable .-> F[escalated]
+    X -. retryable error .-> P[retry_scheduled or escalated at max_attempts]
+    X -. non-retryable API error .-> F
+```
+
+- **Claim and lease.** The claim SQL is §3.3, with a lease of `WORKER_LEASE_SECONDS` (600). A heartbeat thread renews the lease every lease/3 on its own connection. Every final `UPDATE` is guarded by `locked_by = <this worker>`. If the job was reclaimed meanwhile, the result is discarded (`lease_lost`).
+- **Customer.** `customer_name` from the extraction is fuzzy-matched (rapidfuzz WRatio ≥ 88) to `customers.name`. Below that score: `customer_id = null`, the extracted name is kept, and a `customer_unknown` log is written.
+- **Lines.** `Matcher(load_catalog_from_db(conn)).match_line(...)` runs for every extracted line. The catalog is reloaded for each job, so portal edits count. Line numbers are renumbered 1..n.
+- **Success** (one transaction): delete any old draft for the job (after a portal requeue), insert `quotes` and `quote_lines`, write `outputs/<rfq_id>.json` atomically (temp file + rename), then set `succeeded` + `pending_review`, with `model_used` and `fallback_used`. The `succeeded` event detail has the line count, `lines_needing_review`, `customer_id`, model, fallback, document confidence and tokens.
+- **Failure.**
+
+  | Cause | Result |
+  |---|---|
+  | `ExtractionError(retryable=True)` (timeouts after the in-call retries, no usable answer even from the fallback), or an unexpected exception | `attempts < max_attempts`: `pending`, `run_after = now() + WORKER_RETRY_BACKOFF_SECONDS * 2^(attempts-1)`, event `retry_scheduled`. Otherwise: `failed` + `pending_review` + `escalation_reason`, event `escalated` |
+  | Unsupported type, unreadable or missing file, non-retryable API error (400/401...) | At once `failed` + `pending_review` + `escalation_reason`, event `escalated` |
+  | Ctrl+C during a job | Job released: back to `pending` without spending the attempt, event `requeued` |
+
+- **Run:** `python -m app.worker [--workers N] [--once] [--max-jobs N] [--worker-id ID]`. It starts `WORKER_COUNT` worker processes (default 1; `--workers` overrides it), named `worker:<id>-1..N`. With one process, the actor is `worker:<id>` (default `<hostname>-<pid>`). `--max-jobs` applies to each worker. Settings: `WORKER_COUNT` (1), `WORKER_POLL_SECONDS` (5), `WORKER_LEASE_SECONDS` (600), `WORKER_RETRY_BACKOFF_SECONDS` (60), plus the `LLM_*` settings (§3.6).
 
 ## 4. Draft quote JSON (`outputs/<rfq_id>.json`)
 
@@ -248,6 +313,14 @@ The structure follows the answer key and `check_submission.py`. The worker write
 | `discontinued_replaced` | The requested part is discontinued, and its replacement was quoted |
 | `unit_mismatch` | The requested unit differs from the catalog unit |
 | `quantity_unclear` | The quantity is missing or ambiguous |
+| `cross_reference_missing` | A competitor number that is not in the cross-reference sheet; matched by description instead |
+| `cross_reference_conflict` | The line's description does not fit the cross-referenced part (size missing, or similarity < 0.5) |
+| `size_mismatch` | The best description match lacks a size or spec the customer wrote |
+| `discontinued` | Matched a discontinued part with no replacement |
+| `low_extraction_confidence` | The extractor was unsure it read the line correctly (below the review threshold) |
+| `unit_unclear`, `refers_to_previous_order`, `refers_to_other_line`, `vague_description`, `illegible`, `substitution_allowed` | Copied from the extractor's `issues` (§3.6) |
+
+Every flag needs review except `unverified_cross_reference`, `discontinued_replaced`, `cross_reference_missing` and `substitution_allowed`, which are informational (`BLOCKING_FLAGS` in `app/worker/matcher.py`).
 
 ## 5. Cross-reference mapping (for the matcher)
 
@@ -265,18 +338,40 @@ The structure follows the answer key and `check_submission.py`. The worker write
 
 The key is `(competitor_part_number_norm, ridgeline_part_number)`, **not** the competitor number alone: `NF-610338` maps to two parts (`RL177128`, `RL107716`).
 
-**Matcher lookup order:**
+### 5.1 Worker step 3: matcher (`app/worker/matcher.py`)
 
-1. **Exact Ridgeline number:** `products.part_number_norm = normalize_part_number(token)` → `ridgeline_part_number`, 0.99.
-2. **Cross-reference:** `cross_references.competitor_part_number_norm = normalize_part_number(token)`.
-   - One row → `cross_reference`, 0.95. A note, or a missing `last_verified`, lowers the confidence and adds a flag.
-   - Several rows → flag `ambiguous_cross_reference` and set `needs_review`.
-3. **Description:** trigram similarity on `products.description` (`pg_trgm` index `products_description_trgm`) or `rapidfuzz` over `app.catalog`, then rerank. At most 0.90.
-4. **LLM pick** among the description candidates → `llm`.
+```python
+from app.catalog import load_catalog_from_db
+from app.worker.matcher import Matcher
 
-After any step, if the product is `discontinued`, follow `products.replaced_by` (`RL150432` → `RL120374`), quote the replacement and add the flag `discontinued_replaced`. One cross-reference row points to the discontinued part.
+matcher = Matcher(load_catalog_from_db(conn))   # worker: DB, so portal corrections count
+                                                # (Matcher() alone loads data/*.csv)
+result = matcher.match_line(extracted_line, from_image=extraction.from_image, log=log, job_id=job_id)
+line_json = {**extracted_fields, **result.to_line_fields()}   # ridgeline_part_number, match_method,
+                                                              # confidence, needs_review, flags, note
+```
 
-The same data is available in memory through `app.catalog.load_catalog()` (`products_normalized`, `cross_references`, `resolve_replacement()`).
+`match(as_written, part_number=, description=, unit=, from_image=)` does the same with plain strings: without a part number or description, it finds them in `as_written` itself. `search(text, k=5, unit=)` returns the top catalog candidates. Every `MatchResult` carries `candidates` (top 5, with score and the tokens they miss) for the future LLM pick. The CLI uses the CSV data and needs no database: `python -m app.worker.matcher "20 ea 6204-2RS bearings" "NF-610338"`. Tests: `python -m unittest discover -s tests -t .`
+
+**Lookup order** (first hit wins):
+
+| Step | How | `match_method` | Confidence |
+|---|---|---|---|
+| 1. Our part number | Any token of the line, or `part_number`, equals `products.part_number_norm` after `normalize_part_number()` | `ridgeline_part_number` | 0.99 |
+| 2. Cross-reference | Same, against `cross_references.competitor_part_number_norm` | `cross_reference` | 0.95. A note caps it at 0.75 (`cross_reference_note`). No `last_verified`: −0.05. Description doesn't fit: capped at 0.60 (`cross_reference_conflict`). Two or more targets: 0.60 (`ambiguous_cross_reference`), with the target that best fits the description first |
+| 3. Description | Most similar product (below) | `description` | 0.90 × similarity. Missing size: capped at 0.70 (`size_mismatch`). Top two within 0.05: capped at 0.60 (`ambiguous_match`). Similarity < 0.35, or no word in common: `no_match`, part null |
+| 4. LLM pick (future) | The LLM chooses among `candidates` | `llm` | — |
+
+After the match, a `discontinued` product is replaced by its `replaced_by` part (−0.05, `discontinued_replaced`), and a requested unit that differs from the catalog unit adds `unit_mismatch`. Through `match_line`, extraction `issues` become flags, `extraction_confidence` caps the confidence, and `customer_note` is added to the note. `needs_review` = confidence < `MATCH_REVIEW_THRESHOLD` (env, default 0.8) **or** a blocking flag (§4).
+
+**Description similarity.** It works on the tokens of the customer's description and of each catalog description, after the same normalization on both sides:
+- Inch marks are dropped (`2"`, `2 in` → `2`), `150#` → `150lb`, `gr5`/`grade 5` → `grade5`, `5 HP` → `5hp`, `AW 46` → `aw46`, `1 1/2` → `1-1/2`, `20 x 20 x 2` → `20x20x2`, `L`/`Large`/`size L` → `size_l`.
+- Synonyms: bolt = screw, hyd = hydraulic, SS = stainless, FP = full port. Plurals are dropped.
+- Score = the IDF-weighted share of the customer's tokens found in the product: rare tokens like `6205` weigh more than `bearing`.
+- **Sizes and specs** (any token with a digit) must match exactly. Words may match with small typos (rapidfuzz ratio ≥ 85).
+- Words that aren't in the catalog count little. Unknown sizes count a lot.
+- A candidate whose unit equals the requested unit gets +0.06 in the ranking, so "nitrile gloves L, boxes" picks the box of disposable gloves.
+- A discontinued product and its replacement count as one candidate.
 
 ## 6. Portal contract (for Codex)
 
@@ -314,7 +409,9 @@ SELECT * FROM job_events WHERE job_id = %s ORDER BY created_at;
 | Cancel | `SET job_status='cancelled', finished_at=now()` | `job_status='pending'` |
 | Fix a part | `UPDATE quote_lines SET corrected_part_number=%s` | Job is `pending_review`. The part must exist in `products`; record a `part_corrected` event |
 
-**The portal must not:** change prices or write to `products` and `customers`; edit `as_written`, `confidence` or `match_method`; change `running` jobs; delete rows.
+**Catalog maintenance.** Reviewers can create an active product with an initial list price or edit its description, category, unit, and warehouse. Existing part numbers, prices, status, and replacement links are read-only in the portal. The `portal_revision` column guards against stale edits and preserves portal-maintained catalog fields during CSV reseeding. Catalog mutations write a `product_created` or `product_updated` entry to `pipeline_logs` in the same transaction. Creating a product from a draft line also sets its `corrected_part_number` and writes a `part_corrected` event atomically. Catalog changes in Postgres are visible to portal lookups immediately. The CSV-backed in-memory catalog is a separate reference snapshot.
+
+**The portal must not:** write to `customers`; edit `as_written`, `confidence` or `match_method`; change `running` jobs; delete rows.
 
 ## 7. Files
 
@@ -323,11 +420,12 @@ SELECT * FROM job_events WHERE job_id = %s ORDER BY created_at;
 | `db/schema.sql` | Tables, constraints, indexes |
 | `app/db.py` | `connect()`, `apply_schema()` |
 | `app/seed.py` | `python -m app.seed`: schema + CSV load |
-| `app/catalog.py` | In-memory catalog and `normalize_part_number()` |
+| `app/catalog.py` | Catalog from CSV (`load_catalog()`) or Postgres (`load_catalog_from_db()`), and `normalize_part_number()` |
 | `app/paths.py` | Paths and `safe_path()` |
 | `app/pipeline_log.py` | `PipelineLogger`: writes `pipeline_logs` and the console |
 | `app/dispatcher/` | Part 1: `python -m app.dispatcher` scans `rfqs/` and queues jobs |
-| `app/worker/` | Part 2 |
+| `app/worker/` | Part 2. `transformer.py`: file to text, or route to the LLM (§3.5). `extractor.py` + `schemas.py` + `settings.py`: LLM extraction with retries and fallback (§3.6). `matcher.py`: line → product (§5.1). `worker.py` + `__main__.py`: the job loop (§3.7) |
+| `work/text/` | Text extracted by the transformer (git-ignored) |
 | `app/portal/` | Streamlit review portal and its Postgres repository |
 | `data/` | Reference CSVs (see `data/README.md`) |
 
@@ -338,3 +436,11 @@ SELECT * FROM job_events WHERE job_id = %s ORDER BY created_at;
   2. Decide what an intentional re-run means (for example, a `requeued` event on the existing job instead of a new row).
   3. Clean up the duplicate test jobs before adding the constraint.
 - **Folder → inbox trigger.** In production the dispatcher listens on the email inbox instead of a folder (see the plan).
+
+### 8.1 Known bugs to fix (code review, 2026-11-28)
+
+| ID | Where | Problem | Failure | Suggested fix |
+|---|---|---|---|---|
+| **BUG-1** | `app/worker/worker.py` `_succeed` (`output_rel`) | The output file is `outputs/<rfq_id>.json`, named after the file stem only | Duplicate test jobs (§8 TODO(dedupe)), or two files with the same stem (`rfq_01.txt`, `rfq_01.pdf`), write the same file, and the last job to finish wins. The approved quote in the DB may not be the file on disk | Name drafts per job (`outputs/drafts/<rfq_id>_<job_id[:8]>.json`), and write the submission file `outputs/<rfq_id>.json` only from the approved or latest job of each RFQ. Or fix TODO(dedupe) first |
+| **BUG-2** | `app/worker/worker.py` `_succeed` (`_write_json_atomic`) | The JSON file is written inside the DB transaction, before the job `UPDATE`, the `succeeded` event and the commit | If any of those or the commit fails, the transaction rolls back and the job is retried, but the file stays: a quote file with no quote in the DB | Write after the commit (or to a temp path, renamed after commit). If the file write fails after the commit, log an ERROR and let the portal regenerate it from `quotes.output_json` |
+| **BUG-3** | `app/worker/extractor.py` `extract` → `build_content` / `_image_block` | `build_content` runs outside the extractor's error handling. `.heic` (not readable by plain Pillow), corrupt images and file read errors raise a generic exception | The worker treats it as unexpected, retries 3 times (60 s, 120 s) and then escalates "Gave up after 3 attempts". No `extraction_failed` row is logged | Wrap `build_content`: turn PIL `UnidentifiedImageError` / `OSError` into `ExtractionError(retryable=False)` (escalate at once with "unreadable image") and log `extraction_failed`. Drop `.heic` from the image types unless `pillow-heif` is installed |
