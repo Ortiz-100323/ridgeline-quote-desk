@@ -175,3 +175,23 @@
 - user_prompt: "Into our main readme, create a full guide of running this project, deploying the portal."
 - assistant_response_summary: "Extended README.md (keeping the other session's rewrite, which landed mid-turn, and the checker's required heading order). Under ## How to Run: quick start plus ### 1-10 (prerequisites Python 3.13/PostgreSQL 16 with pg_trgm, clone + venv + pip, docker run postgres:16 on 127.0.0.1, .env from .env.example with the existing settings table + PGSSLMODE note, app.seed, app.dispatcher [--folder], app.worker [--once/--workers/--max-jobs], streamlit portal + existing feature list, tests/evaluation/check_submission, troubleshooting table). Under ## Production: ### Deploying the portal (Dockerfile + .dockerignore given as snippets, not created; local docker test; Azure PostgreSQL Flexible Server East US with azure.extensions=PG_TRGM and seed; ACR build + Container App on port 8501 with secretref DB password and PGSSLMODE=require; Entra ID auth required since the portal has none, sticky sessions for WebSockets, VNet/firewall, secrets; update by new image tag; workers on the same image with Azure Files). check_submission.py: README PASS; remaining FAILs are uncommitted/untracked work. Nothing committed."
 - files_affected: "README.md, .chat-history/log.md"
+---
+- timestamp: "2026-11-28T05:49:02-03:00"
+- user_prompt: "yes, commit everything and push"
+- assistant_response_summary: "On main, so created branch feat/worker-evaluation. Staged everything (32 files: worker modules, evaluation/, outputs/, tests/, portal/schema/contract/README changes incl. another session's expanded README); confirmed .env, zip, work/ and __pycache__ not staged; secret scan found only the README Azure example DATABASE_PASSWORD=secretref:db-password (a placeholder reference, not a secret). Committed 2ebd2f2 'Add worker pipeline, matcher, evaluation and draft outputs' and pushed to origin/feat/worker-evaluation (main untouched). check_submission.py: 0 FAIL, 0 WARN, all 14 checks PASS. This log entry is appended after the commit, so log.md is modified again."
+- files_affected: ".chat-history/log.md"
+---
+- timestamp: "2026-11-28T05:49:32-03:00"
+- user_prompt: "merge it into main and push"
+- assistant_response_summary: "Fetched origin: origin/main (663efad) is an ancestor of feat/worker-evaluation, so fast-forwarded main without checkout (git fetch . feat/worker-evaluation:main, 663efad..2ebd2f2), pushed main to origin, and switched to main (up to date with origin/main). Only .chat-history/log.md remains modified (log entries written after the commit). Branch feat/worker-evaluation kept locally and on origin."
+- files_affected: ".chat-history/log.md"
+---
+- timestamp: "2026-11-28T05:49:57-03:00"
+- user_prompt: "run checksubmission.py"
+- assistant_response_summary: "Ran check_submission.py on main: 0 FAIL, 1 WARN, format checks passed; zip written (ridgeline-quote-desk.zip, 2.7 MB). The only WARN is .chat-history/log.md changed after the last commit (session log entries appended after each reply; the zip includes the current version). No code changes."
+- files_affected: ".chat-history/log.md"
+---
+- timestamp: "2026-11-28T05:50:33-03:00"
+- user_prompt: "commit the log and push, and what is the log."
+- assistant_response_summary: "Appended this entry first so the commit includes it, then committed only .chat-history/log.md on main ('Update chat history log') and pushed to origin/main. Explained the log: .chat-history/log.md is the append-only record of every prompt/response pair from Claude Code and Codex (rules in .claude/rules/claude_logging.md and .codex/codex_logging.md), one entry per exchange with timestamp, user_prompt, assistant_response_summary and files_affected, secrets redacted; check_submission.py requires .chat-history/ (Chat history check). Distinguished it from the pipeline_logs table, which logs runtime steps of the dispatcher/worker/portal."
+- files_affected: ".chat-history/log.md"
